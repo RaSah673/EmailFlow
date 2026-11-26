@@ -1,5 +1,4 @@
 import os, time, logging, json
-from pathlib import Path
 from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
 from opentelemetry import trace, metrics
@@ -35,7 +34,7 @@ tracer=trace.get_tracer(SERVICE)
 meter=metrics.get_meter(SERVICE)
 processed=meter.create_counter('emailflow.emails.processed')
 failures=meter.create_counter('emailflow.failures')
-pool=ConnectionPool(os.getenv('DATABASE_URL','postgresql://emailflow:emailflow@postgres:5432/emailflow'),min_size=1,max_size=int(os.getenv('DB_POOL_SIZE','4')),kwargs={'row_factory':dict_row},open=False)
+pool=ConnectionPool(os.environ['DATABASE_URL'],min_size=1,max_size=int(os.getenv('DB_POOL_SIZE','4')),kwargs={'row_factory':dict_row},open=False)
 BOOTSTRAP=os.getenv('KAFKA_BOOTSTRAP','kafka:9092')
 TOPICS={'standard':'emailflow.standard','urgent':'emailflow.urgent'}
 GROUPS={p:'emailflow-'+p for p in TOPICS}
@@ -44,8 +43,7 @@ PARTITIONS={'standard':12,'urgent':24}
 def init_db():
     pool.open(wait=True,timeout=90)
     with pool.connection() as conn:
-        conn.execute('SELECT pg_advisory_xact_lock(879321)')
-        conn.execute(Path(__file__).with_name('schema.sql').read_text())
+        conn.execute('SELECT 1 FROM campaigns LIMIT 1')
 
 def trace_id():
     ctx=trace.get_current_span().get_span_context()

@@ -34,3 +34,42 @@ CREATE TABLE IF NOT EXISTS mirror_jobs (
  updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(campaign_id,seq)
 );
 CREATE INDEX IF NOT EXISTS mirror_pending ON mirror_jobs(updated_at) WHERE status IN ('pending','sending');
+
+-- v2 migration (run only as schema owner)
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE IF NOT EXISTS archive_documents (
+ campaign_id uuid PRIMARY KEY REFERENCES campaigns(id),
+ indexed_at timestamptz NOT NULL DEFAULT now(), model text NOT NULL,
+ search_text tsvector NOT NULL
+);
+CREATE INDEX IF NOT EXISTS archive_fts ON archive_documents USING gin(search_text);
+CREATE TABLE IF NOT EXISTS archive_vectors (
+ campaign_id uuid NOT NULL REFERENCES archive_documents(campaign_id) ON DELETE CASCADE,
+ part integer NOT NULL, embedding vector(384) NOT NULL, PRIMARY KEY(campaign_id,part)
+);
+CREATE INDEX IF NOT EXISTS archive_hnsw ON archive_vectors USING hnsw (embedding vector_cosine_ops);
+CREATE TABLE IF NOT EXISTS archive_index_retries (
+ campaign_id uuid PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+ next_attempt timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auth_users (
+ id uuid PRIMARY KEY, username text UNIQUE NOT NULL, password_hash text NOT NULL,
+ totp_secret text NOT NULL, last_totp_step bigint NOT NULL DEFAULT -1,
+ role text NOT NULL CHECK(role IN ('admin','operator','viewer')), enabled boolean NOT NULL DEFAULT true,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS auth_sessions (
+ token_hash text PRIMARY KEY, user_id uuid NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+ csrf_hash text NOT NULL, expires_at timestamptz NOT NULL, last_seen timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS auth_session_user ON auth_sessions(user_id);
+CREATE INDEX IF NOT EXISTS auth_session_expiry ON auth_sessions(expires_at);
+CREATE TABLE IF NOT EXISTS auth_limits (
+ scope text PRIMARY KEY, window_start timestamptz NOT NULL DEFAULT now(), attempts integer NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS security_audit (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, actor text NOT NULL, action text NOT NULL,
+ outcome text NOT NULL, target text, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS campaigns_list_order ON campaigns(created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS campaigns_archive_order ON campaigns(created_at,id) WHERE accepted>0;

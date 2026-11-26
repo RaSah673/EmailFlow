@@ -1,0 +1,85 @@
+name: Security checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+      - name: Install scanners
+        if: ${{ !cancelled() }}
+        run: |
+          python -m venv .venv-security
+          .venv-security/bin/pip install bandit semgrep pip-audit
+          echo "$PWD/.venv-security/bin" >> "$GITHUB_PATH"
+      - name: Python SAST
+        if: ${{ !cancelled() }}
+        run: bandit -r backend/app embedding -ll
+      - name: Semgrep
+        if: ${{ !cancelled() }}
+        run: semgrep scan --metrics=off --config p/default --config p/security-audit --error backend embedding frontend/src scripts
+      - name: Dependency scans
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          pip-audit -r backend/requirements.txt || status=1
+          pip-audit -r embedding/requirements.txt || status=1
+          exit "$status"
+      - name: Frontend dependency scan
+        if: ${{ !cancelled() }}
+        working-directory: frontend
+        run: npm audit --audit-level=high
+      - name: Trivy filesystem and configuration
+        if: ${{ !cancelled() }}
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          version: v0.74.0
+          scan-type: fs
+          scan-ref: .
+          scanners: 'vuln,secret,misconfig'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+          skip-dirs: 'emailflow-v2,.venv,.venv-security,frontend/node_modules,frontend/dist,backups,security/reports'
+      - name: Build local images
+        if: ${{ !cancelled() }}
+        run: |
+          docker build -t emailflow-backend:local backend
+          docker build -t emailflow-frontend:local frontend
+          docker build -t emailflow-embedding:local embedding
+      - name: Scan backend image
+        if: ${{ !cancelled() }}
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          skip-setup-trivy: 'true'
+          image-ref: emailflow-backend:local
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+      - name: Scan frontend image
+        if: ${{ !cancelled() }}
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          skip-setup-trivy: 'true'
+          image-ref: emailflow-frontend:local
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+      - name: Scan embedding image
+        if: ${{ !cancelled() }}
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          skip-setup-trivy: 'true'
+          image-ref: emailflow-embedding:local
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'

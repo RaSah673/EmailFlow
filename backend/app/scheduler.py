@@ -4,6 +4,19 @@ from opentelemetry.propagate import inject
 from .common import *
 from .domain import chunk_ranges
 
+def reserve_campaign(priority):
+    # Commit before exposing tasks to Kafka. Dispatch retries can replay ranges
+    # without reopening the campaign for cancellation.
+    with pool.connection() as conn:
+        row = conn.execute(
+            """SELECT id,status FROM campaigns WHERE priority=%s
+               AND status IN ('scheduled','dispatching') AND scheduled_at<=now()
+               ORDER BY scheduled_at,id LIMIT 1 FOR UPDATE SKIP LOCKED""", (priority,)
+        ).fetchone()
+        if row and row['status'] == 'scheduled':
+            conn.execute("UPDATE campaigns SET status='dispatching' WHERE id=%s", (row['id'],))
+        return row['id'] if row else None
+
 def run():
     init_db(); ensure_topics()
     producer=Producer({'bootstrap.servers':BOOTSTRAP,'enable.idempotence':True,'acks':'all','message.timeout.ms':15000,'linger.ms':5})
@@ -11,8 +24,11 @@ def run():
         work=False
         for priority in ('urgent','standard'):
             try:
+                cid = reserve_campaign(priority)
+                if cid is None:
+                    continue
                 with tracer.start_as_current_span('scheduler.dispatch') as span, pool.connection() as conn:
-                    row=conn.execute("SELECT id,quantity,published,chunk_size FROM campaigns WHERE priority=%s AND status IN ('scheduled','dispatching') AND scheduled_at<=now() ORDER BY scheduled_at,id LIMIT 1 FOR UPDATE SKIP LOCKED",(priority,)).fetchone()
+                    row=conn.execute("SELECT id,quantity,published,chunk_size FROM campaigns WHERE id=%s AND status='dispatching' FOR UPDATE SKIP LOCKED",(cid,)).fetchone()
                     if not row: continue
                     work=True; errors=[]; last=row['published']; cid=str(row['id']); span.set_attribute('campaign.id',cid)
                     def callback(err,msg):

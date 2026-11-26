@@ -48,69 +48,6 @@ roleRef:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: postgres
-  namespace: emailflow
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: postgres
-  template:
-    metadata:
-      labels:
-        app: postgres
-    spec:
-      containers:
-      - name: postgres
-        image: postgres:16.8
-        imagePullPolicy: IfNotPresent
-        ports:
-        - containerPort: 5432
-          name: db
-        env:
-        - name: POSTGRES_DB
-          value: emailflow
-        - name: POSTGRES_USER
-          value: emailflow
-        - name: POSTGRES_PASSWORD
-          value: emailflow
-        - name: PGDATA
-          value: /var/lib/postgresql/data/pgdata
-        resources:
-          requests:
-            cpu: 300m
-            memory: 512Mi
-        volumeMounts:
-        - name: data
-          mountPath: /var/lib/postgresql/data
-      terminationGracePeriodSeconds: 35
-  serviceName: postgres
-  volumeClaimTemplates:
-  - metadata:
-      name: data
-    spec:
-      accessModes:
-      - ReadWriteOnce
-      resources:
-        requests:
-          storage: 10Gi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: postgres
-  namespace: emailflow
-spec:
-  selector:
-    app: postgres
-  ports:
-  - name: db
-    port: 5432
-    targetPort: 5432
----
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
   name: kafka
   namespace: emailflow
 spec:
@@ -125,7 +62,7 @@ spec:
     spec:
       containers:
       - name: kafka
-        image: apache/kafka:3.9.0
+        image: apache/kafka:3.9.2
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 9092
@@ -163,12 +100,22 @@ spec:
           requests:
             cpu: 300m
             memory: 1Gi
+          limits:
+            memory: 2Gi
         volumeMounts:
         - name: data
           mountPath: /var/lib/kafka/data
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
       terminationGracePeriodSeconds: 35
       securityContext:
         fsGroup: 1000
+      automountServiceAccountToken: false
   serviceName: kafka
   volumeClaimTemplates:
   - metadata:
@@ -217,12 +164,37 @@ spec:
           name: smtp
         - containerPort: 1080
           name: http
-        env: []
+        env:
+        - name: HOME
+          value: /tmp
+        volumeMounts:
+        - name: temp
+          mountPath: /tmp
         resources:
           requests:
             cpu: 50m
             memory: 96Mi
+          limits:
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+          seccompProfile:
+            type: RuntimeDefault
       terminationGracePeriodSeconds: 35
+      volumes:
+      - name: temp
+        emptyDir:
+          sizeLimit: 16Mi
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        runAsUser: 10001
+        runAsGroup: 10001
+      automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: Service
@@ -273,7 +245,24 @@ spec:
           requests:
             cpu: 100m
             memory: 256Mi
+          limits:
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
       terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        runAsUser: 10001
+        runAsGroup: 10001
+      automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: Service
@@ -320,17 +309,34 @@ spec:
           requests:
             cpu: 50m
             memory: 96Mi
+          limits:
+            memory: 512Mi
         command:
         - /otelcol
         - --config=/etc/otel/config.yaml
         volumeMounts:
         - name: config
           mountPath: /etc/otel
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
       terminationGracePeriodSeconds: 35
       volumes:
       - name: config
         configMap:
           name: otel-config
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        runAsUser: 10001
+        runAsGroup: 10001
+      automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: Service
@@ -372,7 +378,10 @@ spec:
           name: http
         env:
         - name: DATABASE_URL
-          value: postgresql://emailflow:emailflow@postgres:5432/emailflow
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-api
+              key: DATABASE_URL
         - name: KAFKA_BOOTSTRAP
           value: kafka:9092
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -381,10 +390,28 @@ spec:
           value: emailflow-api
         - name: DB_POOL_SIZE
           value: '2'
+        - name: AUTH_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-auth
+              key: AUTH_ENCRYPTION_KEY
+        - name: EMBED_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-embed-token
+              key: EMBED_TOKEN
+        - name: APP_ORIGIN
+          valueFrom:
+            configMapKeyRef:
+              name: emailflow-config
+              key: APP_ORIGIN
         resources:
           requests:
             cpu: 50m
             memory: 96Mi
+          limits:
+            cpu: '1'
+            memory: 768Mi
         command:
         - uvicorn
         - app.api:app
@@ -392,14 +419,38 @@ spec:
         - 0.0.0.0
         - --port
         - '8000'
+        - --no-access-log
         readinessProbe:
           httpGet:
             path: /api/health
             port: 8000
           periodSeconds: 5
           initialDelaySeconds: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
       terminationGracePeriodSeconds: 35
       serviceAccountName: api
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: true
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
 ---
 apiVersion: v1
 kind: Service
@@ -438,7 +489,10 @@ spec:
           name: http
         env:
         - name: DATABASE_URL
-          value: postgresql://emailflow:emailflow@postgres:5432/emailflow
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-gateway
+              key: DATABASE_URL
         - name: KAFKA_BOOTSTRAP
           value: kafka:9092
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -447,10 +501,18 @@ spec:
           value: emailflow-gateway
         - name: DB_POOL_SIZE
           value: '2'
+        - name: GATEWAY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-gateway-token
+              key: GATEWAY_TOKEN
         resources:
           requests:
             cpu: 50m
             memory: 96Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
         command:
         - uvicorn
         - app.gateway:app
@@ -458,13 +520,37 @@ spec:
         - 0.0.0.0
         - --port
         - '8000'
+        - --no-access-log
         readinessProbe:
           httpGet:
             path: /health
             port: 8000
           periodSeconds: 5
           initialDelaySeconds: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
       terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
 ---
 apiVersion: v1
 kind: Service
@@ -501,7 +587,10 @@ spec:
         ports: []
         env:
         - name: DATABASE_URL
-          value: postgresql://emailflow:emailflow@postgres:5432/emailflow
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-scheduler
+              key: DATABASE_URL
         - name: KAFKA_BOOTSTRAP
           value: kafka:9092
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -514,11 +603,37 @@ spec:
           requests:
             cpu: 50m
             memory: 96Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
         command:
         - python
         - -m
         - app.scheduler
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
       terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -544,7 +659,10 @@ spec:
         - name: PRIORITY
           value: standard
         - name: DATABASE_URL
-          value: postgresql://emailflow:emailflow@postgres:5432/emailflow
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-worker
+              key: DATABASE_URL
         - name: KAFKA_BOOTSTRAP
           value: kafka:9092
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -553,15 +671,46 @@ spec:
           value: emailflow-worker-standard
         - name: DB_POOL_SIZE
           value: '2'
+        - name: GATEWAY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-gateway-token
+              key: GATEWAY_TOKEN
         resources:
           requests:
             cpu: 50m
             memory: 96Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
         command:
         - python
         - -m
         - app.worker
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
       terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -587,7 +736,10 @@ spec:
         - name: PRIORITY
           value: urgent
         - name: DATABASE_URL
-          value: postgresql://emailflow:emailflow@postgres:5432/emailflow
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-worker
+              key: DATABASE_URL
         - name: KAFKA_BOOTSTRAP
           value: kafka:9092
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -596,15 +748,46 @@ spec:
           value: emailflow-worker-urgent
         - name: DB_POOL_SIZE
           value: '2'
+        - name: GATEWAY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-gateway-token
+              key: GATEWAY_TOKEN
         resources:
           requests:
             cpu: 50m
             memory: 96Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
         command:
         - python
         - -m
         - app.worker
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
       terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -628,7 +811,10 @@ spec:
         ports: []
         env:
         - name: DATABASE_URL
-          value: postgresql://emailflow:emailflow@postgres:5432/emailflow
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-mirror
+              key: DATABASE_URL
         - name: KAFKA_BOOTSTRAP
           value: kafka:9092
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -641,11 +827,37 @@ spec:
           requests:
             cpu: 50m
             memory: 96Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
         command:
         - python
         - -m
         - app.mirror
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
       terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -667,20 +879,45 @@ spec:
         image: emailflow-frontend:local
         imagePullPolicy: IfNotPresent
         ports:
-        - containerPort: 80
+        - containerPort: 8080
           name: http
         env: []
         resources:
           requests:
             cpu: 50m
             memory: 96Mi
+          limits:
+            memory: 256Mi
         readinessProbe:
           httpGet:
             path: /
-            port: 80
+            port: 8080
           periodSeconds: 5
           initialDelaySeconds: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+          runAsNonRoot: true
+          runAsUser: 101
+          runAsGroup: 101
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
       terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
 ---
 apiVersion: v1
 kind: Service
@@ -693,4 +930,153 @@ spec:
   ports:
   - name: http
     port: 80
-    targetPort: 80
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: archive
+  namespace: emailflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: archive
+  template:
+    metadata:
+      labels:
+        app: archive
+    spec:
+      containers:
+      - name: archive
+        image: emailflow-backend:local
+        imagePullPolicy: IfNotPresent
+        ports: []
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-archive
+              key: DATABASE_URL
+        - name: EMBED_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-embed-token
+              key: EMBED_TOKEN
+        - name: SERVICE_NAME
+          value: emailflow-archive
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otel:4318
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+          limits:
+            cpu: '1'
+            memory: 768Mi
+        command:
+        - python
+        - -m
+        - app.archive
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embedding
+  namespace: emailflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: embedding
+  template:
+    metadata:
+      labels:
+        app: embedding
+    spec:
+      containers:
+      - name: embedding
+        image: emailflow-embedding:local
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: EMBED_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-embed-token
+              key: EMBED_TOKEN
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 5
+          initialDelaySeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embedding
+  namespace: emailflow
+spec:
+  selector:
+    app: embedding
+  ports:
+  - port: 8000
+    targetPort: 8000
