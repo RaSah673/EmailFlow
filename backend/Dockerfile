@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN apk add --no-cache py3.12-pip \
     && python3.12 -m venv --without-pip /opt/venv \
-    && python3.12 -m pip --python /opt/venv install --no-cache-dir -r requirements.txt
+    && /usr/bin/python3.12 -m pip --python /opt/venv install --no-cache-dir -r requirements.txt
 
 FROM python-runtime
 WORKDIR /app

@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN apk add --no-cache py3.12-pip \
     && python3.12 -m venv --without-pip /opt/venv \
-    && python3.12 -m pip --python /opt/venv install --no-cache-dir -r requirements.txt
+    && /usr/bin/python3.12 -m pip --python /opt/venv install --no-cache-dir -r requirements.txt
 RUN mkdir /models \
     && python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5',cache_dir='/models',threads=2)" \
     && chmod -R a+rX /models
