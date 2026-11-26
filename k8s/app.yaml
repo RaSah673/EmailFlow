@@ -1,0 +1,696 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api
+  namespace: emailflow
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: api-observe
+  namespace: emailflow
+rules:
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ''
+  resources:
+  - pods/log
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: api-observe
+  namespace: emailflow
+subjects:
+- kind: ServiceAccount
+  name: api
+  namespace: emailflow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: api-observe
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: emailflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16.8
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5432
+          name: db
+        env:
+        - name: POSTGRES_DB
+          value: emailflow
+        - name: POSTGRES_USER
+          value: emailflow
+        - name: POSTGRES_PASSWORD
+          value: emailflow
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        resources:
+          requests:
+            cpu: 300m
+            memory: 512Mi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+      terminationGracePeriodSeconds: 35
+  serviceName: postgres
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: emailflow
+spec:
+  selector:
+    app: postgres
+  ports:
+  - name: db
+    port: 5432
+    targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: emailflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+      - name: kafka
+        image: apache/kafka:3.9.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9092
+          name: broker
+        env:
+        - name: KAFKA_NODE_ID
+          value: '1'
+        - name: KAFKA_PROCESS_ROLES
+          value: broker,controller
+        - name: KAFKA_LISTENERS
+          value: PLAINTEXT://0.0.0.0:9092,CONTROLLER://127.0.0.1:9093
+        - name: KAFKA_ADVERTISED_LISTENERS
+          value: PLAINTEXT://kafka.emailflow.svc.cluster.local:9092
+        - name: KAFKA_CONTROLLER_LISTENER_NAMES
+          value: CONTROLLER
+        - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+          value: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+        - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+          value: 1@127.0.0.1:9093
+        - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+          value: '1'
+        - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+          value: '1'
+        - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+          value: '1'
+        - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+          value: '0'
+        - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+          value: 'false'
+        - name: KAFKA_LOG_DIRS
+          value: /var/lib/kafka/data
+        - name: KAFKA_HEAP_OPTS
+          value: -Xms384m -Xmx768m
+        resources:
+          requests:
+            cpu: 300m
+            memory: 1Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/kafka/data
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        fsGroup: 1000
+  serviceName: kafka
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: emailflow
+spec:
+  selector:
+    app: kafka
+  ports:
+  - name: broker
+    port: 9092
+    targetPort: 9092
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailcatcher
+  namespace: emailflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mailcatcher
+  template:
+    metadata:
+      labels:
+        app: mailcatcher
+    spec:
+      containers:
+      - name: mailcatcher
+        image: sj26/mailcatcher:v0.10.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 1025
+          name: smtp
+        - containerPort: 1080
+          name: http
+        env: []
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+      terminationGracePeriodSeconds: 35
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailcatcher
+  namespace: emailflow
+spec:
+  selector:
+    app: mailcatcher
+  ports:
+  - name: smtp
+    port: 1025
+    targetPort: 1025
+  - name: http
+    port: 1080
+    targetPort: 1080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: emailflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+      - name: jaeger
+        image: jaegertracing/all-in-one:1.67.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 16686
+          name: http
+        - containerPort: 4317
+          name: otlp
+        env:
+        - name: COLLECTOR_OTLP_ENABLED
+          value: 'true'
+        - name: MEMORY_MAX_TRACES
+          value: '10000'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+      terminationGracePeriodSeconds: 35
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: emailflow
+spec:
+  selector:
+    app: jaeger
+  ports:
+  - name: http
+    port: 16686
+    targetPort: 16686
+  - name: otlp
+    port: 4317
+    targetPort: 4317
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel
+  namespace: emailflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel
+  template:
+    metadata:
+      labels:
+        app: otel
+    spec:
+      containers:
+      - name: otel
+        image: otel/opentelemetry-collector:0.123.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 4318
+          name: http
+        - containerPort: 4317
+          name: grpc
+        env: []
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+        command:
+        - /otelcol
+        - --config=/etc/otel/config.yaml
+        volumeMounts:
+        - name: config
+          mountPath: /etc/otel
+      terminationGracePeriodSeconds: 35
+      volumes:
+      - name: config
+        configMap:
+          name: otel-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel
+  namespace: emailflow
+spec:
+  selector:
+    app: otel
+  ports:
+  - name: http
+    port: 4318
+    targetPort: 4318
+  - name: grpc
+    port: 4317
+    targetPort: 4317
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: emailflow
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+      - name: api
+        image: emailflow-backend:local
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: DATABASE_URL
+          value: postgresql://emailflow:emailflow@postgres:5432/emailflow
+        - name: KAFKA_BOOTSTRAP
+          value: kafka:9092
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otel:4318
+        - name: SERVICE_NAME
+          value: emailflow-api
+        - name: DB_POOL_SIZE
+          value: '2'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+        command:
+        - uvicorn
+        - app.api:app
+        - --host
+        - 0.0.0.0
+        - --port
+        - '8000'
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          periodSeconds: 5
+          initialDelaySeconds: 3
+      terminationGracePeriodSeconds: 35
+      serviceAccountName: api
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: emailflow
+spec:
+  selector:
+    app: api
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: emailflow
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+      - name: gateway
+        image: emailflow-backend:local
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: DATABASE_URL
+          value: postgresql://emailflow:emailflow@postgres:5432/emailflow
+        - name: KAFKA_BOOTSTRAP
+          value: kafka:9092
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otel:4318
+        - name: SERVICE_NAME
+          value: emailflow-gateway
+        - name: DB_POOL_SIZE
+          value: '2'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+        command:
+        - uvicorn
+        - app.gateway:app
+        - --host
+        - 0.0.0.0
+        - --port
+        - '8000'
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 5
+          initialDelaySeconds: 3
+      terminationGracePeriodSeconds: 35
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: emailflow
+spec:
+  selector:
+    app: gateway
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scheduler
+  namespace: emailflow
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: scheduler
+  template:
+    metadata:
+      labels:
+        app: scheduler
+    spec:
+      containers:
+      - name: scheduler
+        image: emailflow-backend:local
+        imagePullPolicy: IfNotPresent
+        ports: []
+        env:
+        - name: DATABASE_URL
+          value: postgresql://emailflow:emailflow@postgres:5432/emailflow
+        - name: KAFKA_BOOTSTRAP
+          value: kafka:9092
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otel:4318
+        - name: SERVICE_NAME
+          value: emailflow-scheduler
+        - name: DB_POOL_SIZE
+          value: '2'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+        command:
+        - python
+        - -m
+        - app.scheduler
+      terminationGracePeriodSeconds: 35
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-standard
+  namespace: emailflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker-standard
+  template:
+    metadata:
+      labels:
+        app: worker-standard
+    spec:
+      containers:
+      - name: worker-standard
+        image: emailflow-backend:local
+        imagePullPolicy: IfNotPresent
+        ports: []
+        env:
+        - name: PRIORITY
+          value: standard
+        - name: DATABASE_URL
+          value: postgresql://emailflow:emailflow@postgres:5432/emailflow
+        - name: KAFKA_BOOTSTRAP
+          value: kafka:9092
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otel:4318
+        - name: SERVICE_NAME
+          value: emailflow-worker-standard
+        - name: DB_POOL_SIZE
+          value: '2'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+        command:
+        - python
+        - -m
+        - app.worker
+      terminationGracePeriodSeconds: 35
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-urgent
+  namespace: emailflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker-urgent
+  template:
+    metadata:
+      labels:
+        app: worker-urgent
+    spec:
+      containers:
+      - name: worker-urgent
+        image: emailflow-backend:local
+        imagePullPolicy: IfNotPresent
+        ports: []
+        env:
+        - name: PRIORITY
+          value: urgent
+        - name: DATABASE_URL
+          value: postgresql://emailflow:emailflow@postgres:5432/emailflow
+        - name: KAFKA_BOOTSTRAP
+          value: kafka:9092
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otel:4318
+        - name: SERVICE_NAME
+          value: emailflow-worker-urgent
+        - name: DB_POOL_SIZE
+          value: '2'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+        command:
+        - python
+        - -m
+        - app.worker
+      terminationGracePeriodSeconds: 35
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mirror
+  namespace: emailflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mirror
+  template:
+    metadata:
+      labels:
+        app: mirror
+    spec:
+      containers:
+      - name: mirror
+        image: emailflow-backend:local
+        imagePullPolicy: IfNotPresent
+        ports: []
+        env:
+        - name: DATABASE_URL
+          value: postgresql://emailflow:emailflow@postgres:5432/emailflow
+        - name: KAFKA_BOOTSTRAP
+          value: kafka:9092
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otel:4318
+        - name: SERVICE_NAME
+          value: emailflow-mirror
+        - name: DB_POOL_SIZE
+          value: '2'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+        command:
+        - python
+        - -m
+        - app.mirror
+      terminationGracePeriodSeconds: 35
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: emailflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: emailflow-frontend:local
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 80
+          name: http
+        env: []
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 5
+          initialDelaySeconds: 3
+      terminationGracePeriodSeconds: 35
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: emailflow
+spec:
+  selector:
+    app: frontend
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
