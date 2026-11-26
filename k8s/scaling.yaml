@@ -1,0 +1,52 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-urgent
+  namespace: emailflow
+spec:
+  scaleTargetRef:
+    name: worker-urgent
+  pollingInterval: 5
+  cooldownPeriod: 30
+  minReplicaCount: 1
+  maxReplicaCount: 24
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+          - type: Pods
+            value: 12
+            periodSeconds: 15
+        scaleDown:
+          stabilizationWindowSeconds: 60
+  triggers:
+  - type: kafka
+    metadata:
+      bootstrapServers: kafka.emailflow.svc.cluster.local:9092
+      consumerGroup: emailflow-urgent
+      topic: emailflow.urgent
+      lagThreshold: '100'
+      offsetResetPolicy: earliest
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-standard
+  namespace: emailflow
+spec:
+  scaleTargetRef:
+    name: worker-standard
+  pollingInterval: 5
+  cooldownPeriod: 30
+  minReplicaCount: 1
+  maxReplicaCount: 12
+  triggers:
+  - type: kafka
+    metadata:
+      bootstrapServers: kafka.emailflow.svc.cluster.local:9092
+      consumerGroup: emailflow-standard
+      topic: emailflow.standard
+      lagThreshold: '100'
+      offsetResetPolicy: earliest

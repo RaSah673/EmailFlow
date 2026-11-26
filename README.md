@@ -95,6 +95,7 @@ The load test stores a real row per simulated acceptance and generates real Kafk
 - `scripts/`: deployment, loopback forwarding, cleanup, integration tests.
 
 ## References
+
 - Kafka delivery semantics: https://kafka.apache.org/22/design/design/
 - KEDA Kafka scaler: https://keda.sh/docs/2.17/scalers/apache-kafka/
 - SMTP RFC 5321, section 4.5.3.2.6: https://datatracker.ietf.org/doc/html/rfc5321
@@ -102,6 +103,5 @@ The load test stores a real row per simulated acceptance and generates real Kafk
 - MailCatcher: https://github.com/sj26/mailcatcher
 
 ## Validation status at packaging
+
 Python compilation, pure domain unit tests, YAML parsing, shell syntax and TypeScript transpilation (syntax only) are checked during packaging. Full frontend dependency install/typecheck/build, DB/Kafka integration, container image builds and real KEDA scaling are **not run** here: package registry DNS/network unavailable, Docker/Kubernetes not installed. Use the included verification script on your local machine. This is a source delivery, not a certified deployment or performance benchmark.
-#   E m a i l F l o w  
- 
