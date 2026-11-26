@@ -2,4 +2,13 @@ node_modules/
 dist/
 __pycache__/
 .venv/
+.venv-*/
 .pytest_cache/
+security/reports/
+backups/
+.env*
+*.pem
+*.key
+*.dump
+.emailflow-kubeconfig
+frontend/node_modules/

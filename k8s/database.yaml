@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: emailflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: pgvector/pgvector:0.8.2-pg16
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5432
+          name: db
+        env:
+        - name: POSTGRES_DB
+          value: emailflow
+        - name: POSTGRES_USER
+          value: emailflow
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: emailflow-db-owner
+              key: POSTGRES_PASSWORD
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        resources:
+          requests:
+            cpu: 300m
+            memory: 512Mi
+          limits:
+            memory: 4Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        - name: sockets
+          mountPath: /var/run/postgresql
+        - name: tmp
+          mountPath: /tmp
+        readinessProbe:
+          exec:
+            command: ["pg_isready", "-h", "127.0.0.1", "-U", "emailflow", "-d", "emailflow"]
+          periodSeconds: 3
+          initialDelaySeconds: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          seccompProfile:
+            type: RuntimeDefault
+      volumes:
+      - name: sockets
+        emptyDir:
+          sizeLimit: 8Mi
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 35
+      automountServiceAccountToken: false
+  serviceName: postgres
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: emailflow
+spec:
+  selector:
+    app: postgres
+  ports:
+  - name: db
+    port: 5432
+    targetPort: 5432

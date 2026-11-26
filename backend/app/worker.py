@@ -14,7 +14,8 @@ def run():
     consumer=Consumer({'bootstrap.servers':BOOTSTRAP,'group.id':GROUPS[priority],'auto.offset.reset':'earliest','enable.auto.commit':False,'enable.auto.offset.store':False,'max.poll.interval.ms':300000})
     consumer.subscribe([TOPICS[priority]])
     gateway=os.getenv('GATEWAY_URL','http://gateway:8000')
-    with httpx.Client(timeout=10) as client:
+    headers = {'Authorization': 'Bearer ' + os.environ['GATEWAY_TOKEN']}
+    with httpx.Client(timeout=10, trust_env=False, headers=headers) as client:
         try:
             while running:
                 msg=consumer.poll(1)
@@ -28,7 +29,13 @@ def run():
                         carrier={k:v.decode() for k,v in (msg.headers() or []) if v is not None}
                         with tracer.start_as_current_span('worker.deliver',context=extract(carrier)) as span:
                             span.set_attribute('campaign.id',cid); span.set_attribute('email.priority',priority)
-                            r=client.post(gateway+'/deliver',json=chunk); r.raise_for_status(); receipt=r.json()
+                            r=client.post(gateway+'/deliver',json=chunk)
+                            if r.status_code==410:
+                                # A v1 publisher could leave a range for a cancelled campaign.
+                                offsets=consumer.commit(message=msg,asynchronous=False)
+                                if offsets and any(o.error for o in offsets): raise RuntimeError(f'Offset commit failed: {offsets}')
+                                break
+                            r.raise_for_status(); receipt=r.json()
                             if receipt['accepted']!=chunk['end']-chunk['start']+1: raise RuntimeError('Incomplete acceptance')
                             with pool.connection() as conn:
                                 row=conn.execute('SELECT fault FROM campaigns WHERE id=%s',(cid,)).fetchone()
