@@ -1,12 +1,41 @@
-import argparse, base64, secrets, getpass, re
+import argparse, getpass, re
 from uuid import uuid4
 from urllib.parse import quote
 from .common import pool
-from .security import ph,cipher,audit,normalize
+from .security import DEMO_USERNAME, LOCAL_ACCOUNTS, audit, cipher, is_demo, new_totp_secret, normalize, ph
+
+
+def seed_demo(conn, parser):
+    if not LOCAL_ACCOUNTS:
+        parser.error('The demo account is available only in local Compose')
+    account = conn.execute(
+        'SELECT enabled,role,totp_secret FROM auth_users WHERE username=%s', (DEMO_USERNAME,),
+    ).fetchone()
+    if account is not None:
+        if not is_demo(DEMO_USERNAME, account):
+            parser.error('An existing account already uses the demo email')
+        print('The local demo account already exists.')
+        return
+    password = getpass.getpass('Local demo password: ')
+    if not 8 <= len(password) <= 256:
+        parser.error('The local demo password must be 8 to 256 characters')
+    created = conn.execute(
+        """INSERT INTO auth_users(id,username,password_hash,totp_secret,role)
+           VALUES (%s,%s,%s,'','viewer') ON CONFLICT(username) DO NOTHING RETURNING id""",
+        (uuid4(), DEMO_USERNAME, ph.hash(password)),
+    ).fetchone()
+    if not created:
+        parser.error('The demo email was already registered')
+    audit(conn, 'local-cli', 'seed_demo', 'success', DEMO_USERNAME)
+    conn.commit()
+    print(f'Created local demo viewer {DEMO_USERNAME}.')
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('action',choices=['create','reset','disable','enable','revoke','role','list','cleanup']); p.add_argument('username',nargs='?'); p.add_argument('--role',choices=['admin','operator','viewer'],default='viewer'); a=p.parse_args(); pool.open(wait=True,timeout=15)
+    p=argparse.ArgumentParser(); p.add_argument('action',choices=['create','reset','disable','enable','revoke','role','list','cleanup','seed-demo']); p.add_argument('username',nargs='?'); p.add_argument('--role',choices=['admin','operator','viewer'],default='viewer'); a=p.parse_args(); pool.open(wait=True,timeout=15)
     with pool.connection() as conn:
+        if a.action == 'seed-demo':
+            seed_demo(conn, p)
+            return
         if a.action=='list':
             for row in conn.execute('SELECT username,role,enabled FROM auth_users ORDER BY username'): print(row)
             return
@@ -17,7 +46,7 @@ def main():
         if a.action in ('create','reset'):
             pw=getpass.getpass('Password (minimum 15 characters): '); confirm=getpass.getpass('Confirm password: ')
             if pw!=confirm or not 15<=len(pw)<=256: p.error('Passwords differ or length invalid')
-            secret=base64.b32encode(secrets.token_bytes(20)).decode().rstrip('='); encrypted=cipher().encrypt(secret.encode()).decode()
+            secret=new_totp_secret(); encrypted=cipher().encrypt(secret.encode()).decode()
             if a.action=='create': conn.execute('INSERT INTO auth_users(id,username,password_hash,totp_secret,role) VALUES (%s,%s,%s,%s,%s)',(uuid4(),u,ph.hash(pw),encrypted,a.role))
             else:
                 if not conn.execute('UPDATE auth_users SET password_hash=%s,totp_secret=%s,last_totp_step=-1 WHERE username=%s RETURNING id',(ph.hash(pw),encrypted,u)).fetchone(): p.error('Unknown user')

@@ -58,6 +58,17 @@ CREATE TABLE IF NOT EXISTS auth_users (
  role text NOT NULL CHECK(role IN ('admin','operator','viewer')), enabled boolean NOT NULL DEFAULT true,
  created_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE OR REPLACE FUNCTION public.register_local_operator(
+ account_id uuid, email text, hash text, secret text, verified_step bigint
+) RETURNS uuid
+LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+AS $$
+ INSERT INTO public.auth_users(id,username,password_hash,totp_secret,last_totp_step,role)
+ SELECT account_id,email,hash,secret,verified_step,'operator'
+ WHERE secret <> '' AND verified_step >= 0
+ ON CONFLICT (username) DO NOTHING RETURNING id
+$$;
+REVOKE ALL ON FUNCTION public.register_local_operator(uuid,text,text,text,bigint) FROM PUBLIC;
 CREATE TABLE IF NOT EXISTS auth_sessions (
  token_hash text PRIMARY KEY, user_id uuid NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
  csrf_hash text NOT NULL, expires_at timestamptz NOT NULL, last_seen timestamptz NOT NULL DEFAULT now()

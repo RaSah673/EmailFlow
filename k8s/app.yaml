@@ -652,26 +652,24 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: worker-standard
+  name: worker
   namespace: emailflow
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: worker-standard
+      app: worker
   template:
     metadata:
       labels:
-        app: worker-standard
+        app: worker
     spec:
       containers:
-      - name: worker-standard
+      - name: worker
         image: emailflow-backend:local
         imagePullPolicy: IfNotPresent
         ports: []
         env:
-        - name: PRIORITY
-          value: standard
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
@@ -682,84 +680,7 @@ spec:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: http://otel:4318
         - name: SERVICE_NAME
-          value: emailflow-worker-standard
-        - name: DB_POOL_SIZE
-          value: '2'
-        - name: GATEWAY_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: emailflow-gateway-token
-              key: GATEWAY_TOKEN
-        resources:
-          requests:
-            cpu: 50m
-            memory: 96Mi
-          limits:
-            cpu: '1'
-            memory: 512Mi
-        command:
-        - python
-        - -m
-        - app.worker
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
-          seccompProfile:
-            type: RuntimeDefault
-          runAsNonRoot: true
-          runAsUser: 10001
-          runAsGroup: 10001
-          readOnlyRootFilesystem: true
-        volumeMounts:
-        - name: tmp
-          mountPath: /tmp
-      terminationGracePeriodSeconds: 35
-      securityContext:
-        runAsNonRoot: true
-        seccompProfile:
-          type: RuntimeDefault
-      automountServiceAccountToken: false
-      volumes:
-      - name: tmp
-        emptyDir:
-          sizeLimit: 128Mi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: worker-urgent
-  namespace: emailflow
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: worker-urgent
-  template:
-    metadata:
-      labels:
-        app: worker-urgent
-    spec:
-      containers:
-      - name: worker-urgent
-        image: emailflow-backend:local
-        imagePullPolicy: IfNotPresent
-        ports: []
-        env:
-        - name: PRIORITY
-          value: urgent
-        - name: DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: emailflow-worker
-              key: DATABASE_URL
-        - name: KAFKA_BOOTSTRAP
-          value: kafka:9092
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: http://otel:4318
-        - name: SERVICE_NAME
-          value: emailflow-worker-urgent
+          value: emailflow-worker
         - name: DB_POOL_SIZE
           value: '2'
         - name: GATEWAY_TOKEN

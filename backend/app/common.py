@@ -37,7 +37,7 @@ failures=meter.create_counter('emailflow.failures')
 pool=ConnectionPool(os.environ['DATABASE_URL'],min_size=1,max_size=int(os.getenv('DB_POOL_SIZE','4')),kwargs={'row_factory':dict_row},open=False)
 BOOTSTRAP=os.getenv('KAFKA_BOOTSTRAP','kafka:9092')
 TOPICS={'standard':'emailflow.standard','urgent':'emailflow.urgent'}
-GROUPS={p:'emailflow-'+p for p in TOPICS}
+WORKER_GROUP='emailflow-workers'
 PARTITIONS={'standard':12,'urgent':24}
 
 def init_db():

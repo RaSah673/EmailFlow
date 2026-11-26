@@ -1,26 +1,46 @@
-import json,os,time,signal
+import json
+import os
+import signal
+import time
+
 import httpx
-from confluent_kafka import Consumer, KafkaException
+from confluent_kafka import Consumer
 from opentelemetry.propagate import extract
-from .common import *
+
+from .common import (
+    BOOTSTRAP, TOPICS, WORKER_GROUP, claim_fault, crash, ensure_topics, failures,
+    incident, init_db, log, pool, processed, resolve, tracer,
+)
 
 running=True
 def stop(*args):
     global running; running=False
 
+
+def queued_tasks(consumer):
+    while running:
+        first = consumer.poll(1)
+        if first is None:
+            continue
+        # Bound the batch so retries do not exceed Kafka's poll interval.
+        batch = [first, *consumer.consume(num_messages=3, timeout=0)]
+        # Stable sorting keeps offsets in order within each partition.
+        yield from sorted(batch, key=lambda message: message.topic() != TOPICS['urgent'])
+
+
 def run():
-    init_db(); ensure_topics(); priority=os.getenv('PRIORITY','standard')
+    init_db(); ensure_topics()
     signal.signal(signal.SIGTERM,stop); signal.signal(signal.SIGINT,stop)
-    consumer=Consumer({'bootstrap.servers':BOOTSTRAP,'group.id':GROUPS[priority],'auto.offset.reset':'earliest','enable.auto.commit':False,'enable.auto.offset.store':False,'max.poll.interval.ms':300000})
-    consumer.subscribe([TOPICS[priority]])
+    consumer=Consumer({'bootstrap.servers':BOOTSTRAP,'group.id':WORKER_GROUP,'auto.offset.reset':'earliest','enable.auto.commit':False,'enable.auto.offset.store':False,'max.poll.interval.ms':300000})
+    consumer.subscribe(list(TOPICS.values()))
     gateway=os.getenv('GATEWAY_URL','http://gateway:8000')
     headers = {'Authorization': 'Bearer ' + os.environ['GATEWAY_TOKEN']}
     with httpx.Client(timeout=10, trust_env=False, headers=headers) as client:
         try:
-            while running:
-                msg=consumer.poll(1)
-                if msg is None: continue
+            for msg in queued_tasks(consumer):
+                if not running: break
                 if msg.error(): log.warning('Kafka: %s',msg.error()); continue
+                priority = 'urgent' if msg.topic() == TOPICS['urgent'] else 'standard'
                 chunk=json.loads(msg.value()); cid=chunk['campaign_id']; delay=.5; started=time.monotonic()
                 time.sleep(float(os.getenv('SIMULATED_CHUNK_LATENCY_MS','30'))/1000)
                 while running:
