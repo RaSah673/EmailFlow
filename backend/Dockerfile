@@ -1,10 +1,18 @@
-FROM cgr.dev/chainguard/wolfi-base:latest@sha256:c902a861151182e4ce2de29b8632ba3f7d75b68c35880580f16e353819e524d3
-RUN apk upgrade --no-cache && apk add --no-cache python-3.12 py3-pip-wheel \
-    && python3.12 -m venv /opt/venv
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:c902a861151182e4ce2de29b8632ba3f7d75b68c35880580f16e353819e524d3 AS python-runtime
+RUN apk upgrade --no-cache && apk add --no-cache python-3.12 \
+    && rm -f /usr/share/python-wheels/pip-*.whl
 ENV PATH="/opt/venv/bin:${PATH}"
+
+FROM python-runtime AS build
 WORKDIR /app
 COPY requirements.txt .
-RUN python -m pip install --no-cache-dir -r requirements.txt
+RUN apk add --no-cache py3.12-pip \
+    && python3.12 -m venv --without-pip /opt/venv \
+    && python3.12 -m pip --python /opt/venv install --no-cache-dir -r requirements.txt
+
+FROM python-runtime
+WORKDIR /app
+COPY --from=build /opt/venv /opt/venv
 COPY app ./app
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
 USER 10001:10001
