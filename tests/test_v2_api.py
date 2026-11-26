@@ -27,6 +27,49 @@ class ApiTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 401)
 
+    def test_registration_is_unavailable_in_managed_mode(self):
+        with patch.object(self.security, 'LOCAL_ACCOUNTS', False):
+            options = self.client.get('/api/auth/options')
+            self.assertEqual(options.json(), {'registration': False, 'demo_username': None})
+            headers = {'Origin': self.security.ORIGIN}
+            start = self.client.post('/api/auth/register', headers=headers, json={
+                'email': 'person@example.com', 'password': 'registration test fixture',
+            })
+            verify = self.client.post('/api/auth/register/verify', headers=headers, json={
+                'enrollment_token': 'unused', 'code': '123456',
+            })
+            self.assertEqual(start.status_code, 404)
+            self.assertEqual(verify.status_code, 404)
+
+    def test_local_registration_checks_origin_before_enrollment(self):
+        with patch.object(self.security, 'LOCAL_ACCOUNTS', True), patch.object(self.security, 'pool') as pool:
+            response = self.client.post('/api/auth/register', headers={'Origin': 'http://elsewhere.test'}, json={
+                'email': 'person@example.com', 'password': 'registration test fixture',
+            })
+            self.assertEqual(response.status_code, 403)
+            pool.connection.assert_not_called()
+
+    def test_origin_aliases_are_limited_to_http_loopback_and_the_configured_port(self):
+        expected = {'http://localhost:18080', 'http://127.0.0.1:18080'}
+        for configured in expected:
+            with self.subTest(configured=configured):
+                self.assertEqual(self.security.allowed_origins(configured), expected)
+        self.assertEqual(self.security.allowed_origins('http://localhost'), {'http://localhost', 'http://127.0.0.1'})
+        self.assertEqual(self.security.allowed_origins('https://example.test'), {'https://example.test'})
+        self.assertEqual(self.security.allowed_origins('https://localhost:8443'), {'https://localhost:8443'})
+
+    def test_demo_password_only_capability_is_limited_to_local_viewer(self):
+        account = {'enabled': True, 'role': 'viewer', 'totp_secret': ''}
+        username = self.security.DEMO_USERNAME
+        with patch.object(self.security, 'LOCAL_ACCOUNTS', True):
+            self.assertTrue(self.security.is_demo(username, account))
+            self.assertFalse(self.security.is_demo(username, dict(account, role='admin')))
+            self.assertFalse(self.security.is_demo(username, dict(account, enabled=False)))
+            self.assertFalse(self.security.is_demo(username, dict(account, totp_secret='enrolled')))
+            self.assertFalse(self.security.is_demo('other@example.com', account))
+        with patch.object(self.security, 'LOCAL_ACCOUNTS', False):
+            self.assertFalse(self.security.is_demo(username, account))
+
     def test_viewer_cannot_write_or_read_admin_routes(self):
         self.api.app.dependency_overrides[self.security.current] = lambda: {'role': 'viewer'}
         try:

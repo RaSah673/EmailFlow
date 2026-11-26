@@ -26,10 +26,10 @@ if [[ -n "$image" && ( "$image" != *pgvector/pgvector:* || -n "$legacy_api" || "
   # Keep cluster reads outside conditionals so any failed read stops the migration.
   scalers=$("${k[@]}" get scaledobjects -o name)
   if [[ -n "$scalers" ]]; then
-    echo 'Remove the two worker ScaledObjects after draining v1 before migrating.' >&2
+    echo 'Remove the v1 worker ScaledObjects after draining before migrating.' >&2
     exit 2
   fi
-  writers='app in (api,scheduler,gateway,worker-standard,worker-urgent,mirror,archive)'
+  writers='app in (api,scheduler,gateway,worker,worker-standard,worker-urgent,mirror,archive)'
   writer_pods=$("${k[@]}" get pods -l "$writers" -o name)
   writer_replicas=$("${k[@]}" get deployments -l "$writers" -o jsonpath='{range .items[*]}{.spec.replicas}{"\n"}{end}')
   if [[ -n "$writer_pods" || "$writer_replicas" =~ [1-9] ]]; then
@@ -55,12 +55,14 @@ helm upgrade --install keda keda --repo https://kedacore.github.io/charts --vers
 "${k[@]}" apply -f k8s/database.yaml
 "${k[@]}" rollout status statefulset/postgres --timeout=10m
 "$emailflow_python" scripts/migrate-db.py "${migration_args[@]}"
+"${k[@]}" delete scaledobject worker-standard worker-urgent --ignore-not-found
+"${k[@]}" delete deployment worker-standard worker-urgent --ignore-not-found --wait=true --timeout=2m
 "${k[@]}" apply -f k8s/network-policy.yaml
 "${k[@]}" apply -f k8s/app.yaml
 "${k[@]}" apply -f k8s/scaling.yaml
 if [[ -n "$image" ]]; then
-  "${k[@]}" rollout restart deployment/api deployment/gateway deployment/scheduler deployment/worker-standard \
-    deployment/worker-urgent deployment/mirror deployment/archive deployment/embedding deployment/frontend
+  "${k[@]}" rollout restart deployment/api deployment/gateway deployment/scheduler deployment/worker \
+    deployment/mirror deployment/archive deployment/embedding deployment/frontend
 fi
-"${k[@]}" rollout status deployment/api deployment/frontend deployment/gateway deployment/embedding --timeout=10m
+"${k[@]}" rollout status deployment/api deployment/frontend deployment/gateway deployment/worker deployment/embedding --timeout=10m
 echo 'Create the first administrator with bash scripts/users.sh create admin --role admin, then run bash scripts/ports.sh.'

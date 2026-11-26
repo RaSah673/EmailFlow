@@ -1,11 +1,11 @@
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: worker-urgent
+  name: worker
   namespace: emailflow
 spec:
   scaleTargetRef:
-    name: worker-urgent
+    name: worker
   pollingInterval: 5
   cooldownPeriod: 30
   minReplicaCount: 1
@@ -25,28 +25,7 @@ spec:
   - type: kafka
     metadata:
       bootstrapServers: kafka.emailflow.svc.cluster.local:9092
-      consumerGroup: emailflow-urgent
-      topic: emailflow.urgent
-      lagThreshold: '100'
-      offsetResetPolicy: earliest
----
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata:
-  name: worker-standard
-  namespace: emailflow
-spec:
-  scaleTargetRef:
-    name: worker-standard
-  pollingInterval: 5
-  cooldownPeriod: 30
-  minReplicaCount: 1
-  maxReplicaCount: 12
-  triggers:
-  - type: kafka
-    metadata:
-      bootstrapServers: kafka.emailflow.svc.cluster.local:9092
-      consumerGroup: emailflow-standard
-      topic: emailflow.standard
+      # Discover both topics from the shared group, which always has a minimum replica.
+      consumerGroup: emailflow-workers
       lagThreshold: '100'
       offsetResetPolicy: earliest

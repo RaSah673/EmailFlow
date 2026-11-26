@@ -1,0 +1,264 @@
+name: emailflow
+
+x-backend: &backend
+  image: emailflow-backend:local
+  pull_policy: never
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: unless-stopped
+  mem_limit: 512m
+  networks: [private]
+
+x-backend-env: &backend-env
+  KAFKA_BOOTSTRAP: kafka:9092
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel:4318
+  DB_POOL_SIZE: '2'
+
+services:
+  frontend:
+    build: ./frontend
+    image: emailflow-frontend:local
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 256m
+    ports: ['127.0.0.1:${EMAILFLOW_DASHBOARD_PORT:-8080}:8080']
+    networks: [edge, private]
+    depends_on:
+      api:
+        condition: service_healthy
+        restart: true
+
+  api:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      DATABASE_URL: postgresql://ef_api:${EMAILFLOW_DB_API_PASSWORD:?Run scripts/compose_local.py}@postgres:5432/emailflow
+      SERVICE_NAME: emailflow-api
+      APP_ORIGIN: ${EMAILFLOW_ORIGIN:-http://localhost:8080}
+      EMAILFLOW_LOCAL_ACCOUNTS: ${EMAILFLOW_LOCAL_ACCOUNTS:-1}
+      AUTH_ENCRYPTION_KEY: ${AUTH_ENCRYPTION_KEY:?Run scripts/compose_local.py}
+      EMBED_TOKEN: ${EMBED_TOKEN:?Run scripts/compose_local.py}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  postgres:
+    image: pgvector/pgvector:0.8.2-pg16
+    environment:
+      POSTGRES_DB: emailflow
+      POSTGRES_USER: emailflow
+      POSTGRES_PASSWORD: ${EMAILFLOW_DB_OWNER_PASSWORD:?Run scripts/compose_local.py}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    read_only: true
+    tmpfs: [/tmp, /var/run/postgresql]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 1g
+    networks: [private]
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, emailflow, -d, emailflow]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *backend
+    build: ./backend
+    restart: 'no'
+    command: [python, /app/scripts/migrate-db.py, --compose]
+    volumes: [./scripts:/app/scripts:ro]
+    environment:
+      DATABASE_URL: postgresql://emailflow:${EMAILFLOW_DB_OWNER_PASSWORD:?Run scripts/compose_local.py}@postgres:5432/emailflow
+      APP_ORIGIN: ${EMAILFLOW_ORIGIN:-http://localhost:8080}
+      EMAILFLOW_LOCAL_ACCOUNTS: ${EMAILFLOW_LOCAL_ACCOUNTS:-1}
+      EMAILFLOW_DB_API_PASSWORD: ${EMAILFLOW_DB_API_PASSWORD:?Run scripts/compose_local.py}
+      EMAILFLOW_DB_SCHEDULER_PASSWORD: ${EMAILFLOW_DB_SCHEDULER_PASSWORD:?Run scripts/compose_local.py}
+      EMAILFLOW_DB_GATEWAY_PASSWORD: ${EMAILFLOW_DB_GATEWAY_PASSWORD:?Run scripts/compose_local.py}
+      EMAILFLOW_DB_WORKER_PASSWORD: ${EMAILFLOW_DB_WORKER_PASSWORD:?Run scripts/compose_local.py}
+      EMAILFLOW_DB_MIRROR_PASSWORD: ${EMAILFLOW_DB_MIRROR_PASSWORD:?Run scripts/compose_local.py}
+      EMAILFLOW_DB_ARCHIVE_PASSWORD: ${EMAILFLOW_DB_ARCHIVE_PASSWORD:?Run scripts/compose_local.py}
+      EMAILFLOW_DB_USERS_PASSWORD: ${EMAILFLOW_DB_USERS_PASSWORD:?Run scripts/compose_local.py}
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  users:
+    <<: *backend
+    profiles: [admin]
+    restart: 'no'
+    entrypoint: [python, -m, app.manage_users]
+    command: [list]
+    environment:
+      DATABASE_URL: postgresql://ef_users:${EMAILFLOW_DB_USERS_PASSWORD:?Run scripts/compose_local.py}@postgres:5432/emailflow
+      AUTH_ENCRYPTION_KEY: ${AUTH_ENCRYPTION_KEY:?Run scripts/compose_local.py}
+      APP_ORIGIN: ${EMAILFLOW_ORIGIN:-http://localhost:8080}
+      EMAILFLOW_LOCAL_ACCOUNTS: ${EMAILFLOW_LOCAL_ACCOUNTS:-1}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  kafka:
+    image: apache/kafka:3.9.2
+    environment:
+      KAFKA_NODE_ID: '1'
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://127.0.0.1:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0'
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms384m -Xmx768m
+      LOG_DIR: /tmp/kafka-logs
+    volumes: [kafka-data:/var/lib/kafka/data]
+    read_only: true
+    tmpfs: [/tmp, '/opt/kafka/config:uid=1000,gid=1000']
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 1536m
+    networks: [private]
+    healthcheck:
+      test: [CMD, bash, -c, 'true > /dev/tcp/127.0.0.1/9092']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  gateway:
+    <<: *backend
+    command: [uvicorn, 'app.gateway:app', --host, 0.0.0.0, --port, '8000']
+    environment:
+      <<: *backend-env
+      DATABASE_URL: postgresql://ef_gateway:${EMAILFLOW_DB_GATEWAY_PASSWORD:?Run scripts/compose_local.py}@postgres:5432/emailflow
+      SERVICE_NAME: emailflow-gateway
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Run scripts/compose_local.py}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  scheduler:
+    <<: *backend
+    command: [python, -m, app.scheduler]
+    environment:
+      <<: *backend-env
+      DATABASE_URL: postgresql://ef_scheduler:${EMAILFLOW_DB_SCHEDULER_PASSWORD:?Run scripts/compose_local.py}@postgres:5432/emailflow
+      SERVICE_NAME: emailflow-scheduler
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      kafka: {condition: service_healthy}
+
+  worker:
+    <<: *backend
+    command: [python, -m, app.worker]
+    environment:
+      <<: *backend-env
+      DATABASE_URL: postgresql://ef_worker:${EMAILFLOW_DB_WORKER_PASSWORD:?Run scripts/compose_local.py}@postgres:5432/emailflow
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Run scripts/compose_local.py}
+      SERVICE_NAME: emailflow-worker
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      kafka: {condition: service_healthy}
+      gateway: {condition: service_healthy}
+
+  mirror:
+    <<: *backend
+    command: [python, -m, app.mirror]
+    environment:
+      <<: *backend-env
+      DATABASE_URL: postgresql://ef_mirror:${EMAILFLOW_DB_MIRROR_PASSWORD:?Run scripts/compose_local.py}@postgres:5432/emailflow
+      SERVICE_NAME: emailflow-mirror
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      mailcatcher: {condition: service_started}
+
+  mailcatcher:
+    image: sj26/mailcatcher:v0.10.0
+    user: '10001:10001'
+    environment: {HOME: /tmp}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 512m
+    ports: ['127.0.0.1:${EMAILFLOW_MAIL_PORT:-1080}:1080']
+    networks: [edge, private]
+
+  archive:
+    <<: *backend
+    command: [python, -m, app.archive]
+    environment:
+      <<: *backend-env
+      DATABASE_URL: postgresql://ef_archive:${EMAILFLOW_DB_ARCHIVE_PASSWORD:?Run scripts/compose_local.py}@postgres:5432/emailflow
+      SERVICE_NAME: emailflow-archive
+      EMBED_TOKEN: ${EMBED_TOKEN:?Run scripts/compose_local.py}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  embedding:
+    build: ./embedding
+    image: emailflow-embedding:local
+    environment:
+      EMBED_TOKEN: ${EMBED_TOKEN:?Run scripts/compose_local.py}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 2g
+    networks: [private]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+
+  otel:
+    image: otel/opentelemetry-collector:0.123.0
+    command: [--config=/etc/otel/config.yaml]
+    volumes: [./k8s/otel-config.yaml:/etc/otel/config.yaml:ro]
+    read_only: true
+    user: '10001:10001'
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 512m
+    networks: [private]
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.67.0
+    environment: {COLLECTOR_OTLP_ENABLED: 'true', MEMORY_MAX_TRACES: '10000'}
+    read_only: true
+    user: '10001:10001'
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 1g
+    ports: ['127.0.0.1:${EMAILFLOW_JAEGER_PORT:-16686}:16686']
+    networks: [edge, private]
+
+volumes:
+  postgres-data:
+  kafka-data:
+
+networks:
+  edge:
+  private:
+    internal: true

@@ -19,7 +19,7 @@ These standards apply to everyone changing or reviewing EmailFlow, including AI 
 
 ## Verification before merge
 
-Install the repository hooks once from an activated Python environment.
+Docker Compose runs the app without a host Python virtual environment. For contributor tools, keep one virtual environment outside the checkout, such as `~/.venvs/emailflow` on macOS or Linux or `%LOCALAPPDATA%\EmailFlow\tools` on Windows. Install the repository hooks once from that activated environment.
 
 ```bash
 python -m pip install pre-commit==4.5.1

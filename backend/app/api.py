@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel,Field,field_validator
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from confluent_kafka import Consumer,TopicPartition
-from .common import BOOTSTRAP, GROUPS, PARTITIONS, TOPICS, init_db, pool
+from .common import BOOTSTRAP, PARTITIONS, TOPICS, WORKER_GROUP, init_db, pool
 from .domain import require_aware,delivery_key
 from .security import router as auth_router,current,operator,admin,audit,limited
 from .archive import router as archive_router
@@ -22,7 +22,7 @@ app.include_router(auth_router)
 app.include_router(archive_router)
 @app.middleware('http')
 async def security_headers(request:Request,call_next):
-    if request.method == 'POST' and request.url.path in ('/api/auth/login','/api/archive/search','/api/campaigns'):
+    if request.method == 'POST' and request.url.path in ('/api/auth/login','/api/auth/register','/api/auth/register/verify','/api/archive/search','/api/campaigns'):
         length = request.headers.get('content-length', '')
         if not length.isascii() or not length.isdecimal() or len(length) > 6 or int(length) > 262144:
             return JSONResponse({'detail':'Invalid request size'},status_code=413)
@@ -118,7 +118,7 @@ def infra(u=Depends(admin)):
         items=kube(f'/apis/apps/v1/namespaces/{ns}/deployments').json()['items']
         for d in items:
             name=d['metadata']['name']
-            if name in ('worker-standard','worker-urgent','gateway','scheduler','api'):
+            if name in ('worker','gateway','scheduler','api'):
                 result['workers'].append({'name':name,'desired':d['spec'].get('replicas',1),'ready':d.get('status',{}).get('readyReplicas',0)})
     except Exception as e: result['kubernetes_error']=str(e)
     try:
@@ -127,7 +127,7 @@ def infra(u=Depends(admin)):
             name=pods[0]['metadata']['name']; result['logs']=kube(f'/api/v1/namespaces/{ns}/pods/{name}/log?tailLines=80').text
     except Exception: pass
     for p in TOPICS:
-        consumer=Consumer({'bootstrap.servers':BOOTSTRAP,'group.id':GROUPS[p],'enable.auto.commit':False,'socket.timeout.ms':3000})
+        consumer=Consumer({'bootstrap.servers':BOOTSTRAP,'group.id':WORKER_GROUP,'enable.auto.commit':False,'socket.timeout.ms':3000})
         try:
             partitions=[TopicPartition(TOPICS[p],i) for i in range(PARTITIONS[p])]
             offsets=consumer.committed(partitions,timeout=3)
@@ -143,6 +143,6 @@ def infra(u=Depends(admin)):
 def traces(u=Depends(admin)):
     try:
         base=os.getenv('JAEGER_URL','http://jaeger:16686')
-        r=httpx.get(base+'/api/traces',params={'service':'emailflow-worker-urgent','limit':12,'lookback':'1h'},timeout=3);r.raise_for_status()
+        r=httpx.get(base+'/api/traces',params={'service':'emailflow-worker','limit':12,'lookback':'1h'},timeout=3);r.raise_for_status()
         return [{'trace_id':t['traceID'],'spans':len(t['spans']),'operation':t['spans'][0]['operationName']} for t in r.json()['data'] if t['spans']]
     except Exception: return []

@@ -28,6 +28,8 @@ jobs:
           for script in scripts/*.sh tests/*.sh; do bash -n "$script"; done
       - name: Test upgrade preflight
         run: bash tests/test_upgrade_guard.sh
+      - name: Validate local Compose configuration
+        run: python scripts/compose_local.py config --quiet
 
   backend:
     runs-on: ubuntu-latest

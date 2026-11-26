@@ -43,10 +43,7 @@ spec:
   - from:
     - podSelector:
         matchLabels:
-          app: worker-standard
-    - podSelector:
-        matchLabels:
-          app: worker-urgent
+          app: worker
     ports:
     - protocol: TCP
       port: 8000
@@ -98,10 +95,7 @@ spec:
           app: scheduler
     - podSelector:
         matchLabels:
-          app: worker-standard
-    - podSelector:
-        matchLabels:
-          app: worker-urgent
+          app: worker
     - podSelector:
         matchLabels:
           app: mirror
@@ -136,10 +130,7 @@ spec:
           app: scheduler
     - podSelector:
         matchLabels:
-          app: worker-standard
-    - podSelector:
-        matchLabels:
-          app: worker-urgent
+          app: worker
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: keda
@@ -171,10 +162,7 @@ spec:
           app: scheduler
     - podSelector:
         matchLabels:
-          app: worker-standard
-    - podSelector:
-        matchLabels:
-          app: worker-urgent
+          app: worker
     - podSelector:
         matchLabels:
           app: mirror

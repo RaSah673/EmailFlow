@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify authenticated delivery and archive behavior through loopback and Kind."""
+"""Verify authenticated delivery and archive behavior in the local stack."""
 import argparse
 import getpass
 import http.cookiejar
@@ -17,14 +17,16 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from cluster import kubectl
+from compose_local import compose_command
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 from app.totp import totp
 
 
 class Client:
-    def __init__(self, origin):
+    def __init__(self, origin, compose=False):
         self.origin = origin
+        self.compose = compose
         self.csrf = ''
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
@@ -53,20 +55,25 @@ def expect_status(code, operation):
         raise AssertionError(f'Expected HTTP {code}, received success')
 
 
-def sql(query):
-    return subprocess.check_output(kubectl() + ['exec', 'postgres-0', '--', 'psql', '-X', '-v',
+def sql(query, compose=False):
+    target = compose_command() + ['exec', '-T', 'postgres'] if compose else kubectl() + ['exec', 'postgres-0', '--']
+    return subprocess.check_output(target + ['psql', '-X', '-v',
         'ON_ERROR_STOP=1', '-U', 'emailflow', '-d', 'emailflow', '-At', '-c', query], text=True).strip()
 
 
-def admin_command(*args, **kwargs):
-    return subprocess.run([sys.executable, str(Path(__file__).with_name('manage-users.py')), *args],
-                          check=True, text=True, capture_output=True, **kwargs).stdout
+def admin_command(*args, compose=False, input_text=None):
+    target = (compose_command() + ['run', '--rm', '-T', 'users'] if compose
+              else [sys.executable, str(Path(__file__).with_name('manage-users.py'))])
+    # Preserve LF when piping credentials from Windows into a Linux container.
+    data = input_text.encode() if input_text is not None else None
+    return subprocess.run([*target, *args],
+                          check=True, capture_output=True, input=data).stdout.decode()
 
 
-def fixture(role):
+def fixture(role, compose=False):
     username = f'it-{role}-{secrets.token_hex(4)}'
     password = secrets.token_urlsafe(30)
-    output = admin_command('create', username, '--role', role, input=f'{password}\n{password}\n')
+    output = admin_command('create', username, '--role', role, compose=compose, input_text=f'{password}\n{password}\n')
     secret = re.search(r'(?m)^([A-Z2-7]{32})\s*$', output)
     assert secret, 'Fixture did not return an enrollment secret'
     return {'username': username, 'password': password, 'secret': secret[1]}
@@ -83,9 +90,9 @@ def campaign(name, subject, priority, count, fault='none', delay=15):
             'scheduled_at': (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()}
 
 
-def replicas():
-    raw = subprocess.check_output(kubectl() + ['get', 'deployment', 'worker-standard', 'worker-urgent', '-o', 'json'])
-    return {item['metadata']['name'].removeprefix('worker-'): item['spec']['replicas'] for item in json.loads(raw)['items']}
+def ready_replicas():
+    raw = subprocess.check_output(kubectl() + ['get', 'deployment', 'worker', '-o', 'json'])
+    return json.loads(raw).get('status', {}).get('readyReplicas', 0)
 
 
 def verify_delivery(client, timeout, workloads, *, check_scaling=False):
@@ -96,30 +103,29 @@ def verify_delivery(client, timeout, workloads, *, check_scaling=False):
         cid = str(UUID(row['id']))
         assert client.call(f'/campaigns/{cid}')['accepted'] == 0, 'Accepted before scheduled time'
         queued[cid] = payload
-    peaks = {'standard': 1, 'urgent': 1}
+    peak = 1
     pending = dict(queued)
     while pending:
         assert time.monotonic() - started < timeout, 'Campaign delivery timed out'
         if check_scaling:
-            for priority, count in replicas().items():
-                peaks[priority] = max(count, peaks[priority])
+            peak = max(peak, ready_replicas())
         for cid, payload in list(pending.items()):
             row = client.call(f'/campaigns/{cid}')
             if row['status'] != 'completed':
                 continue
             size, fault = payload['quantity'], payload['fault']
             assert row['accepted'] == row['completed'] == row['published'] == size
-            assert sql(f"SELECT count(*) || ':' || count(DISTINCT seq) FROM receipts WHERE campaign_id='{cid}'") == f'{size}:{size}'
-            assert sql(f"SELECT count(*) FROM completed_chunks WHERE campaign_id='{cid}'") == str((size + 99) // 100)
+            assert sql(f"SELECT count(*) || ':' || count(DISTINCT seq) FROM receipts WHERE campaign_id='{cid}'", client.compose) == f'{size}:{size}'
+            assert sql(f"SELECT count(*) FROM completed_chunks WHERE campaign_id='{cid}'", client.compose) == str((size + 99) // 100)
             if fault != 'none':
-                assert sql(f"SELECT count(*) FROM incidents WHERE campaign_id='{cid}' AND kind='{fault}' AND resolved_at IS NOT NULL") == '1'
+                assert sql(f"SELECT count(*) FROM incidents WHERE campaign_id='{cid}' AND kind='{fault}' AND resolved_at IS NOT NULL", client.compose) == '1'
             print(f'PASS {payload["priority"]} {fault}: {size} unique receipts in {time.monotonic() - started:.1f}s', flush=True)
             pending.pop(cid)
         if pending:
             time.sleep(3)
     if check_scaling:
-        assert all(peak > 1 for peak in peaks.values()), f'Scale-out not observed: {peaks}'
-        print(f'Observed peak desired replicas: {peaks}', flush=True)
+        assert peak > 1, f'Scale-out not observed: {peak}'
+        print(f'Observed peak ready worker replicas: {peak}', flush=True)
     return list(queued)
 
 
@@ -149,18 +155,21 @@ def verify_archive(client, invoice_id, window):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--million', action='store_true', help='Also run one million recipients in each worker pool')
-    parser.add_argument('--ephemeral-users', action='store_true', help='Create and disable disposable users in a test Kind cluster')
-    parser.add_argument('--embedding-outage', action='store_true', help='Pause embedding temporarily in a test Kind cluster')
+    parser.add_argument('--compose', action='store_true', help='Target the emailflow Docker Compose project')
+    parser.add_argument('--million', action='store_true', help='Run one million recipients per priority and check shared worker scaling')
+    parser.add_argument('--ephemeral-users', action='store_true', help='Create and disable disposable users')
+    parser.add_argument('--embedding-outage', action='store_true', help='Pause embedding temporarily')
     parser.add_argument('--timeout', type=int, default=1800)
     parser.add_argument('--origin', default=os.getenv('EMAILFLOW_ORIGIN', 'http://localhost:8080'))
     args = parser.parse_args()
     if not re.fullmatch(r'http://(localhost|127\.0\.0\.1):[1-9][0-9]{0,4}', args.origin):
         parser.error('Use a loopback HTTP origin with an explicit port')
-    if (args.ephemeral_users or args.embedding_outage) and not os.getenv('EMAILFLOW_CLUSTER_NAME', '').endswith('-test'):
+    if args.compose and args.million:
+        parser.error('--million verifies KEDA scaling and requires Kind')
+    if (args.ephemeral_users or args.embedding_outage) and not args.compose and not os.getenv('EMAILFLOW_CLUSTER_NAME', '').endswith('-test'):
         parser.error('Fault and account fixtures require a dedicated -test cluster')
 
-    admin = Client(args.origin)
+    admin = Client(args.origin, args.compose)
     try:
         expect_status(401, lambda: admin.call('/summary'))
     except urllib.error.URLError as exc:
@@ -169,7 +178,7 @@ def main():
     try:
         if args.ephemeral_users:
             for role in ('admin', 'operator', 'viewer'):
-                fixtures[role] = fixture(role)
+                fixtures[role] = fixture(role, args.compose)
             credentials = login_data(fixtures['admin'])
         else:
             credentials = {'username': input('Admin username: '), 'password': getpass.getpass('Password: '),
@@ -198,15 +207,23 @@ def main():
         expect_status(409, lambda: admin.call(f'/campaigns/{ids[0]}/cancel', {}))
         verify_archive(admin, ids[0], window)
         if args.embedding_outage:
-            target = kubectl()
-            subprocess.run(target + ['scale', 'deployment/embedding', '--replicas=0'], check=True)
+            if args.compose:
+                target = compose_command()
+                stop = ['stop', 'embedding']
+                start = ['up', '-d', '--wait', 'embedding']
+            else:
+                target = kubectl()
+                stop = ['scale', 'deployment/embedding', '--replicas=0']
+                start = ['scale', 'deployment/embedding', '--replicas=1']
+            subprocess.run(target + stop, check=True)
             try:
-                subprocess.run(target + ['rollout', 'status', 'deployment/embedding', '--timeout=90s'], check=True)
+                if not args.compose:
+                    subprocess.run(target + ['rollout', 'status', 'deployment/embedding', '--timeout=90s'], check=True)
                 outage = admin.call('/archive/search', {'query': 'invoice payment', 'scheduled_from': window})
                 assert not outage['semantic_available'] and any(hit['id'] == ids[0] for hit in outage['results'])
                 verify_delivery(admin, args.timeout, [campaign('Embedding paused', 'Delivery independent', 'standard', 101)])
             finally:
-                subprocess.run(target + ['scale', 'deployment/embedding', '--replicas=1'], check=True)
+                subprocess.run(target + start, check=True)
         if args.million:
             verify_delivery(admin, args.timeout, [
                 campaign('Standard scale test', 'Synthetic standard workload', 'standard', 1_000_000),
@@ -219,16 +236,16 @@ def main():
             for _ in range(4):
                 expect_status(401, lambda: Client(args.origin).sign_in(viewer_login))
             expect_status(429, lambda: Client(args.origin).sign_in(viewer_login))
-            sql(f"UPDATE auth_sessions SET last_seen=now()-interval '31 minutes' WHERE user_id=(SELECT id FROM auth_users WHERE username='{fixtures['viewer']['username']}')")
+            sql(f"UPDATE auth_sessions SET last_seen=now()-interval '31 minutes' WHERE user_id=(SELECT id FROM auth_users WHERE username='{fixtures['viewer']['username']}')", args.compose)
             expect_status(401, lambda: viewer.call('/summary'))
-            admin_command('revoke', fixtures['operator']['username'])
+            admin_command('revoke', fixtures['operator']['username'], compose=args.compose)
             expect_status(401, lambda: operator.call('/summary'))
         admin.call('/auth/logout', {})
         expect_status(401, lambda: admin.call('/summary'))
         print('All selected integration scenarios passed.')
     finally:
         for credentials in fixtures.values():
-            admin_command('disable', credentials['username'])
+            admin_command('disable', credentials['username'], compose=args.compose)
 
 
 if __name__ == '__main__':

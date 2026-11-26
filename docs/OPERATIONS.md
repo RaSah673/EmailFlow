@@ -2,7 +2,25 @@
 
 Use the [README](../README.md) to start, use, and test EmailFlow. This guide covers alternate clusters, recovery, security scanning, and recorded verification.
 
-## Cluster and ports
+## Compose project
+
+Use `python scripts/compose_local.py` to start the **emailflow** project. Append `ps`, `logs`, `stop`, or `start` to manage its services. `stop` retains the PostgreSQL and Kafka volumes. Keep `.env.emailflow` with those volumes because it contains the generated database passwords and MFA encryption key.
+
+The dashboard, MailCatcher, and Jaeger ports bind to loopback. To customize ports, set `EMAILFLOW_DASHBOARD_PORT`, `EMAILFLOW_MAIL_PORT`, or `EMAILFLOW_JAEGER_PORT` before starting. Set `EMAILFLOW_ORIGIN` to the dashboard origin when changing its port. A local HTTP dashboard accepts both `localhost` and `127.0.0.1` on that port. Use the matching local URLs for MailCatcher and Jaeger. The dashboard tool links use the default ports.
+
+For a v1 Kind migration, finish pending campaigns and [take a backup](#upgrade-or-recover-an-existing-installation). On a fresh Compose volume, start only PostgreSQL and restore the verified dump before starting the full project.
+
+```bash
+python scripts/compose_local.py up -d --wait postgres
+python scripts/compose_local.py exec -T postgres pg_restore -U emailflow -d emailflow --single-transaction --no-owner --no-privileges < backups/verified-v1.dump
+python scripts/compose_local.py
+```
+
+Compare campaign and receipt counts before retiring the original stack. Kafka starts with empty topics in Compose, so migrating a drained v1 database avoids replaying unfinished ranges.
+
+## Kind cluster and ports
+
+Stop the Compose project before forwarding the same ports from Kind. Use Kind for Kubernetes and KEDA tests.
 
 The default Kind cluster is `emailflow`. The start script and port forwards use `.emailflow-kubeconfig` unless `KUBECONFIG` is set. For direct `kubectl` commands against the default cluster, export `KUBECONFIG="$PWD/.emailflow-kubeconfig"`.
 
@@ -17,7 +35,15 @@ export EMAILFLOW_JAEGER_PORT=17686
 export EMAILFLOW_ORIGIN=http://localhost:18080
 ```
 
-Run the [startup commands](../README.md#run-locally) with these settings. Open MailCatcher and Jaeger directly on the alternate ports. The dashboard links use default ports. Use `bash scripts/stop-local.sh` only to delete the selected cluster and its local data.
+Run the Kind startup commands with these settings. On Windows use WSL2 with Docker integration. Requires Kind 0.24+, kubectl, Helm, and Bash.
+
+```bash
+bash scripts/start-local.sh
+bash scripts/users.sh create admin --role admin
+bash scripts/ports.sh
+```
+
+Keep the port forward running. Use `bash scripts/stop-local.sh` only to delete the selected Kind cluster and its local data. The Kind deployment supports KEDA and `python scripts/verify-local.py --million`.
 
 ## Crash recovery
 
@@ -32,6 +58,8 @@ Run the [startup commands](../README.md#run-locally) with these settings. Open M
 PostgreSQL enforces one simulated receipt per campaign recipient when data persists and retries succeed. MailCatcher samples are best-effort. Keep SMTP pointed at MailCatcher. A production relay needs its own idempotency keys, durable acceptance receipts, uncertain-delivery reconciliation, and bounce tracking.
 
 ## Upgrade or recover an existing installation
+
+On a Compose installation with two worker services, run `python scripts/compose_local.py up --build -d --wait --remove-orphans` to replace them with the shared worker. The Kind startup script removes the legacy worker deployments and scalers during rollout. The shared Kafka group replays retained tasks on its first start. Existing receipts and completion records keep that replay idempotent.
 
 To rehearse, create a dedicated Kind test cluster and restore a v1 logical dump into its PostgreSQL 16 pgvector database before running `python scripts/migrate-db.py`. Compare campaign, receipt, completion, and incident counts before and after. Verify backfill, role access, and delivery on the restored copy. Keep the running v1 cluster online during the rehearsal.
 
@@ -59,7 +87,8 @@ Authenticated search uses bounded semantic, lexical, recent, and priority candid
 
 ## Authentication and infrastructure controls
 
-- Create users with `bash scripts/users.sh create <username> --role admin|operator|viewer`. User administration uses a short-lived pod and separate database role. Its `reset`, `revoke`, `disable`, `enable`, `role`, `list`, and `cleanup` actions manage enrollment and sessions. Keep enrollment secrets private. There is no default account or public signup.
+- Loopback Compose provides browser registration for operators with authenticator enrollment. An administrator can seed the read-only demo using `python scripts/compose_local.py run --rm users seed-demo`. The demo accepts a password alone and must be created explicitly. Set `EMAILFLOW_LOCAL_ACCOUNTS=0` and redeploy to disable browser registration and demo access.
+- Provision users in Kind with `bash scripts/users.sh create <username> --role admin|operator|viewer`. In Compose use `python scripts/compose_local.py run --rm users create <username> --role admin|operator|viewer`. These commands use a short-lived container and a separate database role. The `reset`, `revoke`, `disable`, `enable`, `role`, `list`, and `cleanup` actions manage enrollment and sessions.
 - Argon2id stores password hashes. Every sign-in requires a TOTP code. Fernet encrypts MFA secrets, and a locked database row tracks the latest accepted TOTP step. Opaque 256-bit session tokens are hashed in PostgreSQL. The cookie is HttpOnly and SameSite Strict, with Secure enabled for HTTPS origins. Sessions expire after 30 minutes idle or eight hours absolute. Mutating requests require the configured Origin and a per-session CSRF token.
 - Role checks run on the API. Login has account and workspace throttles, search allows 20 requests per minute per user, and scheduling has per-user rate and workspace backlog limits. The proxy and JSON endpoints bound request sizes. Validation errors omit submitted values. The frontend adds CSP and browser security headers. The audit trail records authentication, administrative actions, campaign changes, and search events without storing search text.
 - PostgreSQL migrations run as owner. Runtime duties use separate database roles, Kubernetes Secrets, explicit internal bearer credentials, and ingress NetworkPolicies. The SMTP mirror can reach only MailCatcher, PostgreSQL, telemetry, and DNS. The application pods run non-root with read-only filesystems, dropped capabilities, seccomp, and resource limits. The cluster administrator can access raw data, Secrets, and direct loopback infrastructure port forwards.
@@ -69,8 +98,8 @@ Authenticated search uses bounded semantic, lexical, recent, and priority candid
 Install Trivy and use an isolated scanner environment. Run the source, dependency, secret, manifest, image, and SBOM checks after building images. Run the passive ZAP baseline against a running loopback instance with Docker host networking available.
 
 ```bash
-python3 -m venv .venv-security
-source .venv-security/bin/activate
+python3 -m venv "$HOME/.venvs/emailflow"
+source "$HOME/.venvs/emailflow/bin/activate"
 pip install bandit semgrep pip-audit
 bash scripts/scan-security.sh
 bash scripts/scan-dast.sh
@@ -97,3 +126,5 @@ Results from the 26 November 2026 integration run. Initialize a fresh cluster an
 The CI test suite also passed locally against PostgreSQL 16 with pgvector in a disposable container. It verified repeatable schema migration, receipt preservation, and archive search against a seeded v1 fixture. PostgreSQL tests and Kafka startup and topic creation passed with read-only roots and dedicated writable mounts. The subsequent Trivy manifest scan found zero high or critical findings. The [CI workflow](../.github/workflows/ci.yml) includes the PostgreSQL test and checks for failed cluster reads during upgrade preflight.
 
 Local results are under `security/reports/`. Dependency scans depend on the advisory database and resolved versions at scan time. The seeded query plan describes a small fixture.
+
+The Compose deployment passed local delivery, both crash-recovery paths, MailCatcher sampling, and lexical and semantic search checks.
