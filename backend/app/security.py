@@ -30,6 +30,7 @@ def cipher(): return Fernet(os.environ['AUTH_ENCRYPTION_KEY'].encode())
 def digest(value): return hashlib.sha256(value.encode()).hexdigest()
 def normalize(s): return s.strip().lower()
 def csrf_for(token):
+    # Derive a separate token so reloads can recover it without browser storage.
     key = base64.urlsafe_b64decode(os.environ['AUTH_ENCRYPTION_KEY'])
     return hmac.new(key, b'emailflow-csrf\0' + token.encode(), hashlib.sha256).hexdigest()
 

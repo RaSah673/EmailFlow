@@ -96,6 +96,8 @@ spec:
           value: /var/lib/kafka/data
         - name: KAFKA_HEAP_OPTS
           value: -Xms384m -Xmx768m
+        - name: LOG_DIR
+          value: /tmp/kafka-logs
         resources:
           requests:
             cpu: 300m
@@ -105,8 +107,13 @@ spec:
         volumeMounts:
         - name: data
           mountPath: /var/lib/kafka/data
+        - name: generated-config
+          mountPath: /opt/kafka/config
+        - name: tmp
+          mountPath: /tmp
         securityContext:
           allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
           capabilities:
             drop:
             - ALL
@@ -115,6 +122,13 @@ spec:
       terminationGracePeriodSeconds: 35
       securityContext:
         fsGroup: 1000
+      volumes:
+      - name: generated-config
+        emptyDir:
+          sizeLimit: 16Mi
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
       automountServiceAccountToken: false
   serviceName: kafka
   volumeClaimTemplates:

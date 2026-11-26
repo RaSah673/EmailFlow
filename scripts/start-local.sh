@@ -3,7 +3,8 @@ set -euo pipefail
 source "$(dirname "$0")/local-env.sh"
 for tool in docker kind kubectl helm "$emailflow_python"; do command -v "$tool" >/dev/null || { echo "Install $tool first"; exit 1; }; done
 
-if ! kind get clusters | grep -Fxq "$EMAILFLOW_CLUSTER_NAME"; then
+clusters=$(kind get clusters)
+if ! grep -Fxq "$EMAILFLOW_CLUSTER_NAME" <<< "$clusters"; then
   kind create cluster --name "$EMAILFLOW_CLUSTER_NAME" --kubeconfig "$KUBECONFIG" --config k8s/kind.yaml
 elif ! kubectl config get-contexts "$emailflow_context" >/dev/null 2>&1; then
   kind export kubeconfig --name "$EMAILFLOW_CLUSTER_NAME" --kubeconfig "$KUBECONFIG"
@@ -11,23 +12,27 @@ fi
 
 image=''
 legacy_api=''
-if kubectl --context "$emailflow_context" get namespace emailflow --ignore-not-found -o name | grep -q .; then
+namespace=$(kubectl --context "$emailflow_context" get namespace emailflow --ignore-not-found -o name)
+if [[ -n "$namespace" ]]; then
   image=$("${k[@]}" get statefulset postgres --ignore-not-found -o jsonpath='{.spec.template.spec.containers[0].image}')
   legacy_api=$("${k[@]}" get deployment api --ignore-not-found -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="DATABASE_URL")].value}')
 fi
 migration_args=()
 if [[ -n "$image" && ( "$image" != *pgvector/pgvector:* || -n "$legacy_api" || "${EMAILFLOW_UPGRADE:-}" == 1 ) ]]; then
   if [[ "${EMAILFLOW_UPGRADE:-}" != 1 || ! -s "${EMAILFLOW_UPGRADE_BACKUP:-}" ]]; then
-    echo 'Existing v1 database detected. See README for backup, drain, and explicit migration commands.' >&2
+    echo 'Existing v1 database detected. See docs/OPERATIONS.md for backup, drain, and migration commands.' >&2
     exit 2
   fi
-  if [[ -n $("${k[@]}" get scaledobjects -o name) ]]; then
+  # Keep cluster reads outside conditionals so any failed read stops the migration.
+  scalers=$("${k[@]}" get scaledobjects -o name)
+  if [[ -n "$scalers" ]]; then
     echo 'Remove the two worker ScaledObjects after draining v1 before migrating.' >&2
     exit 2
   fi
   writers='app in (api,scheduler,gateway,worker-standard,worker-urgent,mirror,archive)'
-  if [[ -n $("${k[@]}" get pods -l "$writers" -o name) ]] ||
-     [[ $("${k[@]}" get deployments -l "$writers" -o jsonpath='{range .items[*]}{.spec.replicas}{"\n"}{end}' | grep -cv '^0$') -gt 0 ]]; then
+  writer_pods=$("${k[@]}" get pods -l "$writers" -o name)
+  writer_replicas=$("${k[@]}" get deployments -l "$writers" -o jsonpath='{range .items[*]}{.spec.replicas}{"\n"}{end}')
+  if [[ -n "$writer_pods" || "$writer_replicas" =~ [1-9] ]]; then
     echo 'Scale v1 writers to zero and wait for their pods to terminate.' >&2
     exit 2
   fi

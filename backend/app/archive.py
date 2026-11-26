@@ -42,6 +42,7 @@ def embed(texts, mode):
 def index_campaign(campaign):
     campaign_id = campaign['id']
     vectors = embed(chunks(campaign['subject'], campaign['body']), 'document')
+    # Publish the document and its full vector set in the same transaction.
     with pool.connection() as conn:
         created = conn.execute(
             """INSERT INTO archive_documents(campaign_id,model,search_text)
